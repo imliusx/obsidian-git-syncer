@@ -366,7 +366,44 @@
 }
 
 .obsidian-git-syncer-sync-toolbar button {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  justify-content: center;
   white-space: nowrap;
+}
+
+.obsidian-git-syncer-sync-toolbar .obsidian-git-syncer-button-icon {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.obsidian-git-syncer-sync-toolbar .obsidian-git-syncer-button-icon svg {
+  height: 15px;
+  width: 15px;
+}
+
+.obsidian-git-syncer-sync-toolbar .obsidian-git-syncer-button-label {
+  line-height: 1;
+}
+
+.obsidian-git-syncer-sync-toolbar .obsidian-git-syncer-sync-action {
+  background: #2563eb;
+  border-color: rgba(37, 99, 235, 0.7);
+  color: #ffffff;
+}
+
+.obsidian-git-syncer-sync-toolbar .obsidian-git-syncer-sync-action:hover:not(:disabled) {
+  background: #1d4ed8;
+  border-color: rgba(29, 78, 216, 0.8);
+  color: #ffffff;
+}
+
+.obsidian-git-syncer-sync-toolbar .obsidian-git-syncer-sync-action:disabled {
+  background: var(--background-modifier-border);
+  border-color: var(--background-modifier-border);
+  color: var(--text-muted);
 }
 
 .obsidian-git-syncer-sync-toolbar .obsidian-git-syncer-muted {

@@ -201,11 +201,20 @@ function parseFrontmatter(content: string): { data: Record<string, string>; body
 function buildFrontmatter(file: TFile, title?: string): string {
   const today = new Date().toISOString().slice(0, 10);
   const resolvedTitle = title?.trim() || file.basename;
+  const slug = resolvedTitle
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^\p{L}\p{N}-]+/gu, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
 
   return [
     "---",
     `title: ${escapeYaml(resolvedTitle)}`,
+    `slug: ${slug || file.basename}`,
     `date: ${today}`,
+    "category: 开发",
     "tags:",
     "  - Java",
     "  - NextJS",
@@ -794,7 +803,9 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
         .setDisabled(!context?.canSync)
         .onClick(() => {
           if (context) {
-            void this.runWithNotice(() => this.syncFileToGitHub(context.file));
+            void this.runWithNotice(async () => {
+              await this.syncFileToGitHub(context.file);
+            });
           }
         })
     );
@@ -874,7 +885,11 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
         .setTitle(context.syncTitle)
         .setIcon("cloud-upload")
         .setDisabled(!context.canSync)
-        .onClick(() => void this.runWithNotice(() => this.syncFileToGitHub(context.file)))
+        .onClick(() =>
+          void this.runWithNotice(async () => {
+            await this.syncFileToGitHub(context.file);
+          })
+        )
     );
     menu.addItem((item) =>
       item
@@ -1343,7 +1358,7 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
     }
   }
 
-  async syncFileToGitHub(file: TFile) {
+  async syncFileToGitHub(file: TFile): Promise<LocalFileState> {
     this.validateConfig();
 
     if (!this.isInsideRoot(file)) {
@@ -1386,16 +1401,19 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
       const nextSha = result.content?.sha ?? currentBlobSha ?? resolvedRemote?.sha ?? cachedSha;
       const htmlUrl = result.content?.html_url ?? this.buildGitHubBlobUrl(remotePath);
 
-      await this.setState(file, {
+      const nextState: LocalFileState = {
         remotePath,
         sha: nextSha,
         status: "synced",
         lastSyncedAt: formatDateTime(new Date()),
         lastSyncedHash: currentHash,
         htmlUrl
-      });
+      };
+
+      await this.setState(file, nextState);
 
       new Notice(`同步成功：${remotePath}`);
+      return nextState;
     } catch (error) {
       await this.setState(file, { remotePath, status: "failed" });
       if (error instanceof GitHubRequestError && error.status === 404) {
@@ -1691,22 +1709,30 @@ class SyncCenterModal extends Modal {
       text: `已选择 ${this.selectedIds.size} 项`
     });
 
-    const syncButton = toolbarEl.createEl("button", { text: `同步本地 (${selectedLocalCount})` });
-    syncButton.type = "button";
-    syncButton.disabled = selectedLocalCount === 0;
-    syncButton.addClass("mod-cta");
-    syncButton.addEventListener("click", () => void this.syncSelectedLocalFiles());
+    const createToolbarButton = (label: string, icon: string) => {
+      const buttonEl = toolbarEl.createEl("button");
+      buttonEl.type = "button";
 
-    const pullButton = toolbarEl.createEl("button", { text: `拉取远端 (${selectedRemoteOnlyCount})` });
-    pullButton.type = "button";
-    pullButton.disabled = selectedRemoteOnlyCount === 0;
-    pullButton.addEventListener("click", () => void this.pullSelectedRemoteFiles());
+      const iconEl = buttonEl.createSpan({ cls: "obsidian-git-syncer-button-icon" });
+      setIcon(iconEl, icon);
+      buttonEl.createSpan({ cls: "obsidian-git-syncer-button-label", text: label });
 
-    const deleteButton = toolbarEl.createEl("button", { text: `删除远端 (${selectedRemoteCount})` });
-    deleteButton.type = "button";
+      return buttonEl;
+    };
+
+    const deleteButton = createToolbarButton(`删除远端 (${selectedRemoteCount})`, "cloud-off");
     deleteButton.disabled = selectedRemoteCount === 0;
     deleteButton.addClass("mod-warning");
     deleteButton.addEventListener("click", () => void this.deleteSelectedRemoteFiles());
+
+    const pullButton = createToolbarButton(`拉取远端 (${selectedRemoteOnlyCount})`, "cloud-download");
+    pullButton.disabled = selectedRemoteOnlyCount === 0;
+    pullButton.addEventListener("click", () => void this.pullSelectedRemoteFiles());
+
+    const syncButton = createToolbarButton(`同步本地 (${selectedLocalCount})`, "cloud-upload");
+    syncButton.disabled = selectedLocalCount === 0;
+    syncButton.addClass("obsidian-git-syncer-sync-action");
+    syncButton.addEventListener("click", () => void this.syncSelectedLocalFiles());
   }
 
   renderStatusSection(containerEl: HTMLElement, status: SyncCenterStatus) {
@@ -1811,16 +1837,23 @@ class SyncCenterModal extends Modal {
       }
 
       try {
-        await this.plugin.syncFileToGitHub(item.file);
+        const nextState = await this.plugin.syncFileToGitHub(item.file);
         successCount += 1;
         this.selectedIds.delete(item.id);
+        item.status = "published";
+        item.state = nextState;
+        item.remote = {
+          remotePath: item.remotePath,
+          sha: nextState.sha ?? "",
+          htmlUrl: nextState.htmlUrl ?? this.plugin.buildGitHubBlobUrl(item.remotePath)
+        };
       } catch {
         failureCount += 1;
       }
     }
 
     new Notice(`同步完成：成功 ${successCount}，失败 ${failureCount}`);
-    await this.refresh();
+    this.renderPreservingScroll();
   }
 
   async pullSelectedRemoteFiles() {
