@@ -1,7 +1,7 @@
 {
   "id": "obsidian-git-syncer",
   "name": "Obsidian Git Syncer",
-  "version": "0.1.14",
+  "version": "0.1.16",
   "minAppVersion": "1.5.0",
   "description": "Sync Markdown notes to the content directory of a GitHub repository.",
   "author": "shaunx liu",

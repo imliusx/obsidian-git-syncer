@@ -204,12 +204,14 @@ function buildFrontmatter(file: TFile, title?: string): string {
 
   return [
     "---",
-    `title: "${escapeYaml(resolvedTitle)}"`,
-    'summary: ""',
-    `date: "${today}"`,
-    `updated: "${today}"`,
-    'tags: ""',
-    "draft: false",
+    `title: ${escapeYaml(resolvedTitle)}`,
+    `date: ${today}`,
+    "tags:",
+    "  - Java",
+    "  - NextJS",
+    "description: 文章摘要",
+    "cover:",
+    "published: true",
     "---",
     ""
   ].join("\n");
@@ -255,6 +257,10 @@ function encodeBytesBase64(bytes: Uint8Array): string {
   });
 
   return btoa(binary);
+}
+
+function textBytes(input: string): Uint8Array {
+  return new TextEncoder().encode(input);
 }
 
 function decodeBase64Bytes(input: string): Uint8Array {
@@ -1159,9 +1165,9 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
       const remotePath = this.remotePath(file);
       const remote = remoteFiles.get(remotePath);
       const state = this.getState(file);
-      const binaryContent = await this.app.vault.readBinary(file);
-      const currentHash =
-        file.extension === "md" ? hashContent(await this.app.vault.read(file)) : hashBytes(binaryContent);
+      const textContent = file.extension === "md" ? await this.app.vault.read(file) : "";
+      const binaryContent = file.extension === "md" ? textBytes(textContent).buffer : await this.app.vault.readBinary(file);
+      const currentHash = file.extension === "md" ? hashContent(textContent) : hashBytes(binaryContent);
       const currentBlobSha = await gitBlobSha(binaryContent);
       let status: SyncCenterStatus;
 
@@ -1170,6 +1176,8 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
       if (!remote) {
         status = "unpublished";
       } else if (remote.sha === currentBlobSha) {
+        status = "published";
+      } else if (state.sha === currentBlobSha && state.status === "synced") {
         status = "published";
       } else if (state.lastSyncedHash && state.lastSyncedHash === currentHash && state.sha === remote.sha) {
         status = "published";
@@ -1344,8 +1352,9 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
 
     const isMarkdown = file.extension === "md";
     const content = isMarkdown ? await this.app.vault.read(file) : "";
-    const binaryContent = isMarkdown ? null : await this.app.vault.readBinary(file);
-    const currentHash = isMarkdown ? hashContent(content) : hashBytes(binaryContent as ArrayBuffer);
+    const binaryContent = isMarkdown ? textBytes(content).buffer : await this.app.vault.readBinary(file);
+    const currentHash = isMarkdown ? hashContent(content) : hashBytes(binaryContent);
+    const currentBlobSha = await gitBlobSha(binaryContent);
     const remotePath = this.remotePath(file);
 
     try {
@@ -1356,7 +1365,7 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
       const putContent = (sha?: string) =>
         this.githubRequest<GitHubPutResponse>("PUT", this.buildContentApiPath(remotePath), {
           message: `${sha ? "sync: update" : "sync: add"} ${remotePath}`,
-          content: isMarkdown ? encodeBase64(content) : encodeBytesBase64(new Uint8Array(binaryContent as ArrayBuffer)),
+          content: isMarkdown ? encodeBase64(content) : encodeBytesBase64(new Uint8Array(binaryContent)),
           branch: this.settings.branch.trim(),
           ...(sha ? { sha } : {})
         });
@@ -1374,7 +1383,7 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
         }
       }
 
-      const nextSha = result.content?.sha ?? resolvedRemote?.sha ?? cachedSha;
+      const nextSha = result.content?.sha ?? currentBlobSha ?? resolvedRemote?.sha ?? cachedSha;
       const htmlUrl = result.content?.html_url ?? this.buildGitHubBlobUrl(remotePath);
 
       await this.setState(file, {
