@@ -33,6 +33,13 @@ interface LocalFileState {
 
 interface PersistedData {
   files: Record<string, LocalFileState>;
+  connection?: ConnectionState;
+}
+
+interface ConnectionState {
+  status: "unknown" | "success" | "failed" | "stale";
+  message: string;
+  checkedAt?: string;
 }
 
 interface ArticleActionContext {
@@ -62,6 +69,8 @@ interface GitHubContentResponse {
   path: string;
   sha: string;
   html_url?: string;
+  content?: string;
+  encoding?: string;
 }
 
 interface GitHubPutResponse {
@@ -76,10 +85,59 @@ interface GitHubUserResponse {
   login: string;
 }
 
+interface GitHubRepoResponse {
+  full_name: string;
+  permissions?: {
+    admin?: boolean;
+    maintain?: boolean;
+    push?: boolean;
+    triage?: boolean;
+    pull?: boolean;
+  };
+}
+
+interface GitHubTreeItem {
+  path: string;
+  type: "blob" | "tree" | string;
+  sha: string;
+}
+
+interface GitHubTreeResponse {
+  tree: GitHubTreeItem[];
+  truncated: boolean;
+}
+
+interface RemoteSyncFile {
+  remotePath: string;
+  sha: string;
+  htmlUrl: string;
+}
+
+type SyncCenterStatus = "unpublished" | "modified" | "published" | "localDeleted";
+
+interface SyncCenterItem {
+  id: string;
+  name: string;
+  status: SyncCenterStatus;
+  localPath?: string;
+  remotePath: string;
+  folderPath: string;
+  file?: TFile;
+  remote?: RemoteSyncFile;
+  state?: LocalFileState;
+}
+
+interface SyncTreeNode {
+  name: string;
+  path: string;
+  children: Map<string, SyncTreeNode>;
+  items: SyncCenterItem[];
+}
+
 const REMOTE_CONTENT_ROOT = "content";
 
 const DEFAULT_SETTINGS: GitHubSyncSettings = {
-  repositoryUrl: "https://github.com/imliusx/obsidian-git-syncer.git",
+  repositoryUrl: "",
   githubUsername: "",
   githubToken: "",
   branch: "main",
@@ -87,15 +145,23 @@ const DEFAULT_SETTINGS: GitHubSyncSettings = {
 };
 
 const DEFAULT_DATA: PersistedData = {
-  files: {}
+  files: {},
+  connection: {
+    status: "unknown",
+    message: "尚未测试连接。"
+  }
 };
 
 class GitHubRequestError extends Error {
   status: number;
+  method: string;
+  path: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, method: string, path: string) {
     super(message);
     this.status = status;
+    this.method = method;
+    this.path = path;
   }
 }
 
@@ -178,6 +244,10 @@ function hashContent(input: string): string {
 
 function encodeBase64(input: string): string {
   const bytes = new TextEncoder().encode(input);
+  return encodeBytesBase64(bytes);
+}
+
+function encodeBytesBase64(bytes: Uint8Array): string {
   let binary = "";
 
   bytes.forEach((byte) => {
@@ -185,6 +255,61 @@ function encodeBase64(input: string): string {
   });
 
   return btoa(binary);
+}
+
+function decodeBase64Bytes(input: string): Uint8Array {
+  const binary = atob(input.replace(/\s/g, ""));
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return bytes;
+}
+
+function decodeBase64(input: string): string {
+  return new TextDecoder().decode(decodeBase64Bytes(input));
+}
+
+function hashBytes(input: ArrayBuffer): string {
+  const bytes = new Uint8Array(input);
+  let hash = 0;
+
+  for (const byte of bytes) {
+    hash = (hash * 31 + byte) | 0;
+  }
+
+  return `h${Math.abs(hash)}`;
+}
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function gitBlobSha(input: ArrayBuffer): Promise<string> {
+  const bytes = new Uint8Array(input);
+  const header = new TextEncoder().encode(`blob ${bytes.byteLength}\0`);
+  const payload = new Uint8Array(header.byteLength + bytes.byteLength);
+  payload.set(header, 0);
+  payload.set(bytes, header.byteLength);
+  const digest = await crypto.subtle.digest("SHA-1", payload);
+  return toHex(new Uint8Array(digest));
+}
+
+function isSyncableFile(file: TFile): boolean {
+  const name = file.name.toLowerCase();
+  if (name.startsWith(".") || name === ".ds_store" || name === "thumbs.db") {
+    return false;
+  }
+
+  return true;
+}
+
+function isImagePath(path: string): boolean {
+  return /\.(avif|gif|jpe?g|png|svg|webp)$/i.test(path);
 }
 
 function parseRepositoryUrl(input: string): GitHubRepo | null {
@@ -262,6 +387,36 @@ function toStatusIcon(status: LocalFileState["status"]): string {
   }
 }
 
+function toSyncCenterStatusLabel(status: SyncCenterStatus): string {
+  switch (status) {
+    case "unpublished":
+      return "本地未发布";
+    case "modified":
+      return "已修改";
+    case "published":
+      return "已发布";
+    case "localDeleted":
+      return "本地已删除";
+    default:
+      return status;
+  }
+}
+
+function toSyncCenterStatusClass(status: SyncCenterStatus): string {
+  switch (status) {
+    case "unpublished":
+      return "is-draft";
+    case "modified":
+      return "is-modified";
+    case "published":
+      return "is-synced";
+    case "localDeleted":
+      return "is-deleted";
+    default:
+      return "is-draft";
+  }
+}
+
 export default class ObsidianGitSyncerPlugin extends Plugin {
   settings: GitHubSyncSettings = DEFAULT_SETTINGS;
   data: PersistedData = DEFAULT_DATA;
@@ -274,6 +429,11 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
 
     this.addRibbonIcon("git-branch", "Obsidian Git Syncer", (evt) => {
       this.showRibbonMenu(evt);
+    });
+    this.addCommand({
+      id: "open-sync-center",
+      name: "打开同步中心",
+      callback: () => this.openSyncCenter()
     });
 
     this.statusBarEl = this.addStatusBarItem();
@@ -318,6 +478,14 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
   }
 
   async saveSettings() {
+    await this.saveAllData();
+  }
+
+  async markConnectionStale() {
+    this.data.connection = {
+      status: "stale",
+      message: "配置已变更，请重新测试连接。"
+    };
     await this.saveAllData();
   }
 
@@ -387,6 +555,10 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
 
   isInsideRoot(file: TFile): boolean {
     const root = normalizePath(this.settings.localRootPath).replace(/\/$/, "");
+    if (!root) {
+      return false;
+    }
+
     return file.path === root || file.path.startsWith(`${root}/`);
   }
 
@@ -414,6 +586,44 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
     }
 
     return path;
+  }
+
+  localPathFromRemotePath(remotePath: string): string {
+    const normalizedRemotePath = normalizePath(remotePath).replace(/^\/+/, "");
+
+    if (!isSafeContentPath(normalizedRemotePath)) {
+      throw new Error("远端路径必须位于仓库 content 目录内。");
+    }
+
+    const relative = normalizedRemotePath.slice(REMOTE_CONTENT_ROOT.length + 1);
+    const localRoot = normalizePath(this.settings.localRootPath).replace(/\/$/, "");
+    return normalizePath(`${localRoot}/${relative}`);
+  }
+
+  async ensureFolderPath(folderPath: string) {
+    const normalized = normalizePath(folderPath).replace(/\/$/, "");
+
+    if (!normalized) {
+      return;
+    }
+
+    const parts = normalized.split("/");
+    let current = "";
+
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      const entry = this.app.vault.getAbstractFileByPath(current);
+
+      if (entry instanceof TFolder) {
+        continue;
+      }
+
+      if (entry) {
+        throw new Error(`无法创建目录，路径已被文件占用：${current}`);
+      }
+
+      await this.app.vault.createFolder(current);
+    }
   }
 
   getState(file: TFile): LocalFileState {
@@ -584,6 +794,12 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
     );
     menu.addItem((item) =>
       item
+        .setTitle("同步中心")
+        .setIcon("list-tree")
+        .onClick(() => this.openSyncCenter())
+    );
+    menu.addItem((item) =>
+      item
         .setTitle("打开 GitHub")
         .setIcon("external-link")
         .setDisabled(!context?.canOpenRemote)
@@ -592,13 +808,6 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
             void this.runWithNotice(() => this.openRemoteUrlForFile(context.file));
           }
         })
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle("详情")
-        .setIcon("git-branch")
-        .setDisabled(!context)
-        .onClick(() => this.openActionModal(context?.file))
     );
     menu.addItem((item) =>
       item
@@ -629,7 +838,11 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
       item
         .setTitle("测试 GitHub 连接")
         .setIcon("globe")
-        .onClick(() => void this.runWithNotice(() => this.testConnection()))
+        .onClick(() =>
+          void this.runWithNotice(async () => {
+            await this.testConnection();
+          })
+        )
     );
     menu.addItem((item) =>
       item
@@ -666,12 +879,6 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
     );
     menu.addItem((item) =>
       item
-        .setTitle("详情")
-        .setIcon("git-branch")
-        .onClick(() => this.openActionModal(context.file))
-    );
-    menu.addItem((item) =>
-      item
         .setTitle("插入文章属性")
         .setIcon("file-plus-2")
         .setDisabled(!context.canInsertProperties)
@@ -686,10 +893,6 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
         .setDisabled(!context.canDeleteRemote)
         .onClick(() => void this.runWithNotice(() => this.deleteRemoteFile(context.file)))
     );
-  }
-
-  openActionModal(file?: TFile | null) {
-    new GitSyncerActionModal(this.app, this, file ?? this.getCurrentFile()).open();
   }
 
   openPluginSettings() {
@@ -711,6 +914,10 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
 
   openVersionInfo() {
     new PluginVersionModal(this.app, this).open();
+  }
+
+  openSyncCenter() {
+    new SyncCenterModal(this.app, this).open();
   }
 
   async runWithNotice(action: () => Promise<void>) {
@@ -748,6 +955,11 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
     return `${this.buildRepoApiPath()}/branches/${encodeURIComponent(this.settings.branch.trim())}`;
   }
 
+  buildGitTreeApiPath(): string {
+    const repository = this.getRepository();
+    return `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}/git/trees/${encodeURIComponent(this.settings.branch.trim())}`;
+  }
+
   buildGitHubBlobUrl(remotePath: string): string {
     const repository = this.getRepository();
     return `https://github.com/${repository.owner}/${repository.repo}/blob/${encodeURIComponent(this.settings.branch.trim())}/${encodeGitHubPath(remotePath)}`;
@@ -783,7 +995,7 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
         // Keep raw response text when it is not JSON.
       }
 
-      throw new GitHubRequestError(response.status, errorMessage || `GitHub HTTP ${response.status}`);
+      throw new GitHubRequestError(response.status, errorMessage || `GitHub HTTP ${response.status}`, method, path);
     }
 
     return response.json as TResponse;
@@ -818,6 +1030,224 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
 
       throw error;
     }
+  }
+
+  async getRemoteFileBytes(remotePath: string): Promise<{ content: Uint8Array; remote: GitHubContentResponse }> {
+    const remote = await this.getRemoteContent(remotePath);
+
+    if (!remote) {
+      throw new Error(`远端文件不存在：${remotePath}`);
+    }
+
+    if (remote.encoding !== "base64" || !remote.content) {
+      throw new Error(`远端文件内容编码不受支持：${remotePath}`);
+    }
+
+    return {
+      content: decodeBase64Bytes(remote.content),
+      remote
+    };
+  }
+
+  async pullRemoteFile(remotePath: string) {
+    this.validateConfig();
+
+    const { content, remote } = await this.getRemoteFileBytes(remotePath);
+    const localPath = this.localPathFromRemotePath(remotePath);
+    const parentPath = localPath.includes("/") ? localPath.slice(0, localPath.lastIndexOf("/")) : "";
+    await this.ensureFolderPath(parentPath);
+
+    const existing = this.app.vault.getAbstractFileByPath(localPath);
+    const isMarkdown = localPath.toLowerCase().endsWith(".md");
+    const textContent = isMarkdown ? new TextDecoder().decode(content) : "";
+    let file: TFile;
+
+    if (existing instanceof TFile) {
+      if (isMarkdown) {
+        await this.app.vault.modify(existing, textContent);
+      } else {
+        await this.app.vault.modifyBinary(existing, content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength));
+      }
+      file = existing;
+    } else if (existing) {
+      throw new Error(`无法拉取远端文件，本地路径已被目录占用：${localPath}`);
+    } else if (isMarkdown) {
+      file = await this.app.vault.create(localPath, textContent);
+    } else {
+      file = await this.app.vault.createBinary(localPath, content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength));
+    }
+
+    this.data.files[file.path] = {
+      remotePath,
+      sha: remote.sha,
+      status: "synced",
+      lastSyncedAt: formatDateTime(new Date()),
+      lastSyncedHash: isMarkdown ? hashContent(textContent) : hashBytes(content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength)),
+      htmlUrl: remote.html_url ?? this.buildGitHubBlobUrl(remotePath)
+    };
+    await this.saveAllData();
+    await this.refreshStatusBar();
+  }
+
+  collectSyncableFiles(folder: TFolder, files: TFile[] = []): TFile[] {
+    folder.children.forEach((entry) => {
+      if (entry instanceof TFile && isSyncableFile(entry)) {
+        files.push(entry);
+      } else if (entry instanceof TFolder) {
+        this.collectSyncableFiles(entry, files);
+      }
+    });
+
+    return files;
+  }
+
+  getLocalSyncableFiles(): TFile[] {
+    const root = this.getExistingFolder(this.settings.localRootPath);
+    if (!root) {
+      return [];
+    }
+
+    return this.collectSyncableFiles(root)
+      .filter((file) => this.isInsideRoot(file))
+      .sort((a, b) => a.path.localeCompare(b.path, "zh-CN"));
+  }
+
+  async getRemoteSyncableFiles(): Promise<Map<string, RemoteSyncFile>> {
+    this.validateConfig();
+
+    const tree = await this.githubRequest<GitHubTreeResponse>("GET", this.buildGitTreeApiPath(), undefined, {
+      recursive: "1"
+    });
+
+    if (tree.truncated) {
+      new Notice("GitHub 返回的远端目录树被截断，列表可能不完整。");
+    }
+
+    const remoteFiles = new Map<string, RemoteSyncFile>();
+
+    tree.tree.forEach((entry) => {
+      const fileName = entry.path.split("/").pop() ?? "";
+      if (entry.type !== "blob" || !entry.path.startsWith(`${REMOTE_CONTENT_ROOT}/`) || fileName.startsWith(".")) {
+        return;
+      }
+
+      if (!isSafeContentPath(entry.path)) {
+        return;
+      }
+
+      remoteFiles.set(entry.path, {
+        remotePath: entry.path,
+        sha: entry.sha,
+        htmlUrl: this.buildGitHubBlobUrl(entry.path)
+      });
+    });
+
+    return remoteFiles;
+  }
+
+  async buildSyncCenterItems(): Promise<SyncCenterItem[]> {
+    this.validateConfig();
+
+    const [remoteFiles, localFiles] = await Promise.all([
+      this.getRemoteSyncableFiles(),
+      Promise.resolve(this.getLocalSyncableFiles())
+    ]);
+    const items: SyncCenterItem[] = [];
+    const seenRemotePaths = new Set<string>();
+
+    for (const file of localFiles) {
+      const remotePath = this.remotePath(file);
+      const remote = remoteFiles.get(remotePath);
+      const state = this.getState(file);
+      const binaryContent = await this.app.vault.readBinary(file);
+      const currentHash =
+        file.extension === "md" ? hashContent(await this.app.vault.read(file)) : hashBytes(binaryContent);
+      const currentBlobSha = await gitBlobSha(binaryContent);
+      let status: SyncCenterStatus;
+
+      seenRemotePaths.add(remotePath);
+
+      if (!remote) {
+        status = "unpublished";
+      } else if (remote.sha === currentBlobSha) {
+        status = "published";
+      } else if (state.lastSyncedHash && state.lastSyncedHash === currentHash && state.sha === remote.sha) {
+        status = "published";
+      } else {
+        status = "modified";
+      }
+
+      items.push({
+        id: `local:${file.path}`,
+        name: file.name,
+        status,
+        localPath: file.path,
+        remotePath,
+        folderPath: remotePath.slice(0, Math.max(remotePath.lastIndexOf("/"), REMOTE_CONTENT_ROOT.length)),
+        file,
+        remote,
+        state
+      });
+    }
+
+    remoteFiles.forEach((remote, remotePath) => {
+      if (seenRemotePaths.has(remotePath)) {
+        return;
+      }
+
+      const name = remotePath.split("/").pop() ?? remotePath;
+      items.push({
+        id: `remote:${remotePath}`,
+        name,
+        status: "localDeleted",
+        remotePath,
+        folderPath: remotePath.slice(0, Math.max(remotePath.lastIndexOf("/"), REMOTE_CONTENT_ROOT.length)),
+        remote
+      });
+    });
+
+    return items.sort((a, b) => {
+      const statusOrder: Record<SyncCenterStatus, number> = {
+        unpublished: 0,
+        modified: 1,
+        published: 2,
+        localDeleted: 3
+      };
+
+      return statusOrder[a.status] - statusOrder[b.status] || a.remotePath.localeCompare(b.remotePath, "zh-CN");
+    });
+  }
+
+  async deleteRemotePath(remotePath: string) {
+    this.validateConfig();
+
+    if (!isSafeContentPath(remotePath)) {
+      throw new Error("远端路径必须位于仓库 content 目录内。");
+    }
+
+    const remote = await this.getRemoteContent(remotePath);
+    if (!remote) {
+      new Notice(`远端文件不存在：${remotePath}`);
+      return;
+    }
+
+    await this.githubRequest<GitHubDeleteResponse>("DELETE", this.buildContentApiPath(remotePath), {
+      message: `sync: delete ${remotePath}`,
+      sha: remote.sha,
+      branch: this.settings.branch.trim()
+    });
+
+    Object.entries(this.data.files).forEach(([localPath, state]) => {
+      if (state.remotePath === remotePath) {
+        this.data.files[localPath] = {
+          ...state,
+          sha: undefined,
+          htmlUrl: undefined,
+          status: "deleted"
+        };
+      }
+    });
+    await this.saveAllData();
   }
 
   async syncFileState(file: TFile): Promise<LocalFileState> {
@@ -864,19 +1294,45 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
     return nextState;
   }
 
-  async testConnection() {
-    this.validateConfig();
-    const repository = this.getRepository();
-    const user = await this.githubRequest<GitHubUserResponse>("GET", "/user");
+  async testConnection(): Promise<ConnectionState> {
+    try {
+      this.validateConfig();
+      const repository = this.getRepository();
+      const user = await this.githubRequest<GitHubUserResponse>("GET", "/user");
 
-    await this.githubRequest<unknown>("GET", this.buildRepoApiPath());
-    await this.githubRequest<unknown>("GET", this.buildBranchApiPath());
+      const repo = await this.githubRequest<GitHubRepoResponse>("GET", this.buildRepoApiPath());
+      await this.githubRequest<unknown>("GET", this.buildBranchApiPath());
 
-    if (user.login.toLowerCase() !== this.settings.githubUsername.trim().toLowerCase()) {
-      throw new Error(`Token 用户为 ${user.login}，与配置的 GitHub Username 不一致。`);
+      if (user.login.toLowerCase() !== this.settings.githubUsername.trim().toLowerCase()) {
+        throw new Error(`Token 用户为 ${user.login}，与配置的 GitHub Username 不一致。`);
+      }
+
+      if (!repo.permissions?.admin && !repo.permissions?.maintain && !repo.permissions?.push) {
+        throw new Error(
+          `Token 对 ${repo.full_name} 没有写权限。请确认 Fine-grained token 已授权该仓库，并将 Contents 设置为 Read and write。`
+        );
+      }
+
+      const state: ConnectionState = {
+        status: "success",
+        message: `连接成功：${repository.owner}/${repository.repo}@${this.settings.branch.trim()}`,
+        checkedAt: formatDateTime(new Date())
+      };
+      this.data.connection = state;
+      await this.saveAllData();
+      new Notice(state.message);
+      return state;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "连接失败";
+      const state: ConnectionState = {
+        status: "failed",
+        message,
+        checkedAt: formatDateTime(new Date())
+      };
+      this.data.connection = state;
+      await this.saveAllData();
+      throw error;
     }
-
-    new Notice(`连接成功：${repository.owner}/${repository.repo}@${this.settings.branch.trim()}`);
   }
 
   async syncFileToGitHub(file: TFile) {
@@ -886,19 +1342,39 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
       throw new Error("当前文章不在 Local Root Path 内。");
     }
 
-    const content = await this.app.vault.read(file);
-    const currentHash = hashContent(content);
+    const isMarkdown = file.extension === "md";
+    const content = isMarkdown ? await this.app.vault.read(file) : "";
+    const binaryContent = isMarkdown ? null : await this.app.vault.readBinary(file);
+    const currentHash = isMarkdown ? hashContent(content) : hashBytes(binaryContent as ArrayBuffer);
     const remotePath = this.remotePath(file);
 
     try {
-      const remote = await this.getRemoteContent(remotePath);
-      const result = await this.githubRequest<GitHubPutResponse>("PUT", this.buildContentApiPath(remotePath), {
-        message: `${remote ? "sync: update" : "sync: add"} ${remotePath}`,
-        content: encodeBase64(content),
-        branch: this.settings.branch.trim(),
-        sha: remote?.sha
-      });
-      const nextSha = result.content?.sha ?? remote?.sha;
+      const currentState = this.getState(file);
+      const cachedSha = currentState.remotePath === remotePath ? currentState.sha : undefined;
+      let resolvedRemote: GitHubContentResponse | null = null;
+
+      const putContent = (sha?: string) =>
+        this.githubRequest<GitHubPutResponse>("PUT", this.buildContentApiPath(remotePath), {
+          message: `${sha ? "sync: update" : "sync: add"} ${remotePath}`,
+          content: isMarkdown ? encodeBase64(content) : encodeBytesBase64(new Uint8Array(binaryContent as ArrayBuffer)),
+          branch: this.settings.branch.trim(),
+          ...(sha ? { sha } : {})
+        });
+
+      let result: GitHubPutResponse;
+
+      try {
+        result = await putContent(cachedSha);
+      } catch (error) {
+        if (error instanceof GitHubRequestError && (error.status === 409 || error.status === 422)) {
+          resolvedRemote = await this.getRemoteContent(remotePath);
+          result = await putContent(resolvedRemote?.sha);
+        } else {
+          throw error;
+        }
+      }
+
+      const nextSha = result.content?.sha ?? resolvedRemote?.sha ?? cachedSha;
       const htmlUrl = result.content?.html_url ?? this.buildGitHubBlobUrl(remotePath);
 
       await this.setState(file, {
@@ -913,6 +1389,11 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
       new Notice(`同步成功：${remotePath}`);
     } catch (error) {
       await this.setState(file, { remotePath, status: "failed" });
+      if (error instanceof GitHubRequestError && error.status === 404) {
+        throw new Error(
+          `GitHub 写入返回 404：${remotePath}。通常是 Token 没有授权当前仓库、Repository URL 不是目标博客仓库，或分支 ${this.settings.branch.trim()} 不可写。请确认 token 的 Repository access 包含该仓库，且 Contents 为 Read and write。`
+        );
+      }
       throw error;
     }
   }
@@ -996,142 +1477,387 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
   }
 }
 
-class GitSyncerActionModal extends Modal {
+class SyncCenterModal extends Modal {
   plugin: ObsidianGitSyncerPlugin;
-  targetFile: TFile | null;
+  items: SyncCenterItem[] = [];
+  selectedIds = new Set<string>();
+  collapsedPaths = new Set<string>();
+  loading = false;
+  errorMessage = "";
 
-  constructor(app: App, plugin: ObsidianGitSyncerPlugin, targetFile?: TFile | null) {
+  constructor(app: App, plugin: ObsidianGitSyncerPlugin) {
     super(app);
     this.plugin = plugin;
-    this.targetFile = targetFile ?? null;
   }
 
   onOpen() {
-    void this.render();
+    void this.refresh();
   }
 
-  async render() {
+  async refresh() {
+    this.loading = true;
+    this.errorMessage = "";
+    this.render();
+
+    try {
+      this.items = await this.plugin.buildSyncCenterItems();
+      const validIds = new Set(this.items.map((item) => item.id));
+      this.selectedIds.forEach((id) => {
+        if (!validIds.has(id)) {
+          this.selectedIds.delete(id);
+        }
+      });
+    } catch (error) {
+      this.errorMessage = error instanceof Error ? error.message : "同步中心加载失败。";
+    } finally {
+      this.loading = false;
+      this.render();
+    }
+  }
+
+  getSelectedItems(): SyncCenterItem[] {
+    return this.items.filter((item) => this.selectedIds.has(item.id));
+  }
+
+  getSelectedLocalItems(): SyncCenterItem[] {
+    return this.getSelectedItems().filter(
+      (item) => item.file && this.plugin.isInsideRoot(item.file) && item.status !== "published" && item.status !== "localDeleted"
+    );
+  }
+
+  getSelectedRemoteOnlyItems(): SyncCenterItem[] {
+    return this.getSelectedItems().filter((item) => item.status === "localDeleted");
+  }
+
+  getSelectedRemoteItems(): SyncCenterItem[] {
+    return this.getSelectedItems().filter((item) => item.remote);
+  }
+
+  setItemsSelected(items: SyncCenterItem[], selected: boolean) {
+    items.forEach((item) => {
+      if (selected) {
+        this.selectedIds.add(item.id);
+      } else {
+        this.selectedIds.delete(item.id);
+      }
+    });
+  }
+
+  renderPreservingScroll() {
+    const bodyEl = this.contentEl.querySelector<HTMLElement>(".obsidian-git-syncer-sync-center-body");
+    const modalContentEl = this.contentEl.parentElement;
+    const bodyScrollTop = bodyEl?.scrollTop ?? 0;
+    const modalScrollTop = modalContentEl?.scrollTop ?? 0;
+
+    this.render();
+    requestAnimationFrame(() => {
+      const nextBodyEl = this.contentEl.querySelector<HTMLElement>(".obsidian-git-syncer-sync-center-body");
+      if (nextBodyEl) {
+        nextBodyEl.scrollTop = bodyScrollTop;
+      }
+      if (modalContentEl) {
+        modalContentEl.scrollTop = modalScrollTop;
+      }
+    });
+  }
+
+  toggleDirectory(path: string) {
+    if (this.collapsedPaths.has(path)) {
+      this.collapsedPaths.delete(path);
+    } else {
+      this.collapsedPaths.add(path);
+    }
+    this.renderPreservingScroll();
+  }
+
+  buildTree(items: SyncCenterItem[]): SyncTreeNode {
+    const root: SyncTreeNode = {
+      name: REMOTE_CONTENT_ROOT,
+      path: REMOTE_CONTENT_ROOT,
+      children: new Map(),
+      items: []
+    };
+
+    items.forEach((item) => {
+      const relative = item.remotePath.startsWith(`${REMOTE_CONTENT_ROOT}/`)
+        ? item.remotePath.slice(REMOTE_CONTENT_ROOT.length + 1)
+        : item.remotePath;
+      const parts = relative.split("/");
+      const folders = parts.slice(0, -1);
+      let node = root;
+
+      folders.forEach((folder) => {
+        const childPath = `${node.path}/${folder}`;
+        let child = node.children.get(folder);
+        if (!child) {
+          child = {
+            name: folder,
+            path: childPath,
+            children: new Map(),
+            items: []
+          };
+          node.children.set(folder, child);
+        }
+        node = child;
+      });
+
+      node.items.push(item);
+    });
+
+    return root;
+  }
+
+  getNodeItems(node: SyncTreeNode): SyncCenterItem[] {
+    const items = [...node.items];
+    node.children.forEach((child) => {
+      items.push(...this.getNodeItems(child));
+    });
+    return items;
+  }
+
+  render() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.addClass("obsidian-git-syncer-actions");
+    contentEl.addClass("obsidian-git-syncer-sync-center");
 
-    const file = this.targetFile ?? this.plugin.getCurrentFile();
-    const header = contentEl.createEl("h2", { text: "Obsidian Git Syncer" });
-    header.style.marginBottom = "8px";
+    this.renderHeader(contentEl);
 
-    if (!file) {
-      contentEl.createEl("p", { text: "当前没有激活的 Markdown 文件。" });
+    if (this.loading) {
+      contentEl.createDiv({ cls: "obsidian-git-syncer-sync-center-empty", text: "正在加载本地与远端内容..." });
       return;
     }
 
-    const state = await this.plugin.getEffectiveState(file);
-    const inRoot = this.plugin.isInsideRoot(file);
-    const content = await this.plugin.app.vault.read(file);
-    const frontmatter = parseFrontmatter(content).data;
-    const hasFrontmatter = Object.keys(frontmatter).length > 0;
-    const canSync = inRoot && state.status !== "synced";
-    const canDeleteRemote = Boolean(state.sha) && state.status !== "deleted";
-    const canOpenRemote = Boolean(state.htmlUrl || state.remotePath) && state.status !== "deleted";
-    const syncButtonText =
-      state.status === "modified"
-        ? "更新同步"
-        : state.status === "deleted"
-          ? "重新同步"
-          : state.status === "failed"
-            ? "再次同步"
-            : state.status === "synced"
-              ? "已同步"
-              : "同步";
-    const syncDescription =
-      !inRoot
-        ? "当前文章不在 Local Root Path 内。"
-        : state.status === "synced"
-          ? "当前远端文件已经是最新状态。"
-          : `上传当前笔记到 GitHub 仓库的 ${REMOTE_CONTENT_ROOT} 目录。`;
-    const badge = contentEl.createDiv({
-      cls: `obsidian-git-syncer-status-badge ${toStatusClass(state.status)}`
-    });
-    badge.setText(toStatusLabel(state.status));
+    if (this.errorMessage) {
+      contentEl.createDiv({ cls: "obsidian-git-syncer-sync-center-error", text: this.errorMessage });
+      return;
+    }
 
-    contentEl.createEl("p", { text: `当前文件：${file.path}` });
-    contentEl.createEl("p", {
-      text: `远端路径：${state.remotePath ?? (inRoot ? this.plugin.remotePath(file) : `${REMOTE_CONTENT_ROOT}/...`)}`,
-      cls: "obsidian-git-syncer-muted"
-    });
-    contentEl.createEl("p", {
-      text: `状态：${toStatusLabel(state.status)}${state.lastSyncedAt ? ` · 最近同步 ${state.lastSyncedAt}` : ""}`,
-      cls: "obsidian-git-syncer-muted"
-    });
-    contentEl.createEl("p", {
-      text: inRoot
-        ? `当前文件位于同步目录内：${this.plugin.settings.localRootPath}`
-        : `当前文件不在同步目录内：${this.plugin.settings.localRootPath}`,
-      cls: "obsidian-git-syncer-muted"
-    });
+    this.renderSummary(contentEl);
+    this.renderToolbar(contentEl);
 
-    new Setting(contentEl)
-      .setName("插入文章属性")
-      .setDesc(hasFrontmatter ? "当前文章已经存在文章属性。" : "为当前文章插入 Quartz 常用文章属性。")
-      .addButton((button) =>
-        button
-          .setButtonText(hasFrontmatter ? "已存在" : "执行")
-          .setDisabled(!inRoot || hasFrontmatter)
-          .onClick(async () => {
-            await this.runAction(() => this.plugin.ensureTemplateFrontmatter(file));
-            await this.render();
-          })
-      );
-
-    new Setting(contentEl)
-      .setName("同步当前文章")
-      .setDesc(syncDescription)
-      .addButton((button) => {
-        button.setButtonText(syncButtonText).setDisabled(!canSync);
-
-        if (canSync) {
-          button.setCta();
-        }
-
-        button.onClick(async () => {
-          await this.runAction(() => this.plugin.syncFileToGitHub(file));
-          await this.render();
-        });
-      });
-
-    new Setting(contentEl)
-      .setName("删除远端文件")
-      .setDesc("从 GitHub 仓库 content 目录删除当前文章对应文件。")
-      .addButton((button) => {
-        button.setButtonText("删除").setDisabled(!canDeleteRemote);
-
-        if (canDeleteRemote) {
-          button.setWarning();
-        }
-
-        button.onClick(async () => {
-          await this.runAction(() => this.plugin.deleteRemoteFile(file));
-          await this.render();
-        });
-      });
-
-    new Setting(contentEl)
-      .setName("打开 GitHub 文件")
-      .setDesc(canOpenRemote ? "在浏览器中打开当前文章的 GitHub 文件页面。" : "当前文章没有可打开的远端文件。")
-      .addButton((button) =>
-        button
-          .setButtonText("打开")
-          .setDisabled(!canOpenRemote)
-          .onClick(() => void this.plugin.openRemoteUrlForFile(file))
-      );
+    const bodyEl = contentEl.createDiv({ cls: "obsidian-git-syncer-sync-center-body" });
+    const statuses: SyncCenterStatus[] = ["unpublished", "modified", "published", "localDeleted"];
+    statuses.forEach((status) => this.renderStatusSection(bodyEl, status));
   }
 
-  async runAction(action: () => Promise<void>) {
-    try {
-      await action();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "未知错误";
-      new Notice(message);
+  renderHeader(containerEl: HTMLElement) {
+    const headerEl = containerEl.createDiv({ cls: "obsidian-git-syncer-sync-center-header" });
+    const titleGroupEl = headerEl.createDiv();
+    const titleRowEl = titleGroupEl.createDiv({ cls: "obsidian-git-syncer-sync-center-title-row" });
+    titleRowEl.createEl("h2", { text: "同步中心" });
+    const refreshButton = titleRowEl.createEl("button", { cls: "obsidian-git-syncer-icon-button" });
+    refreshButton.type = "button";
+    refreshButton.setAttribute("aria-label", "刷新同步中心");
+    refreshButton.setAttribute("title", "刷新");
+    setIcon(refreshButton, "refresh-cw");
+    refreshButton.addEventListener("click", () => void this.refresh());
+    titleGroupEl.createDiv({
+      cls: "obsidian-git-syncer-muted",
+      text: `${this.plugin.settings.repositoryUrl || "未配置仓库"} · ${this.plugin.settings.branch || "未配置分支"}`
+    });
+  }
+
+  renderSummary(containerEl: HTMLElement) {
+    const summaryEl = containerEl.createDiv({ cls: "obsidian-git-syncer-sync-summary" });
+    const statuses: SyncCenterStatus[] = ["unpublished", "modified", "published", "localDeleted"];
+
+    statuses.forEach((status) => {
+      const count = this.items.filter((item) => item.status === status).length;
+      const badgeEl = summaryEl.createDiv({
+        cls: `obsidian-git-syncer-sync-summary-item ${toSyncCenterStatusClass(status)}`
+      });
+      badgeEl.createSpan({ text: toSyncCenterStatusLabel(status) });
+      badgeEl.createSpan({ text: String(count), cls: "obsidian-git-syncer-sync-summary-count" });
+    });
+  }
+
+  renderToolbar(containerEl: HTMLElement) {
+    const toolbarEl = containerEl.createDiv({ cls: "obsidian-git-syncer-sync-toolbar" });
+    const selectedLocalCount = this.getSelectedLocalItems().length;
+    const selectedRemoteOnlyCount = this.getSelectedRemoteOnlyItems().length;
+    const selectedRemoteCount = this.getSelectedRemoteItems().length;
+
+    toolbarEl.createDiv({
+      cls: "obsidian-git-syncer-muted",
+      text: `已选择 ${this.selectedIds.size} 项`
+    });
+
+    const syncButton = toolbarEl.createEl("button", { text: `同步本地 (${selectedLocalCount})` });
+    syncButton.type = "button";
+    syncButton.disabled = selectedLocalCount === 0;
+    syncButton.addClass("mod-cta");
+    syncButton.addEventListener("click", () => void this.syncSelectedLocalFiles());
+
+    const pullButton = toolbarEl.createEl("button", { text: `拉取远端 (${selectedRemoteOnlyCount})` });
+    pullButton.type = "button";
+    pullButton.disabled = selectedRemoteOnlyCount === 0;
+    pullButton.addEventListener("click", () => void this.pullSelectedRemoteFiles());
+
+    const deleteButton = toolbarEl.createEl("button", { text: `删除远端 (${selectedRemoteCount})` });
+    deleteButton.type = "button";
+    deleteButton.disabled = selectedRemoteCount === 0;
+    deleteButton.addClass("mod-warning");
+    deleteButton.addEventListener("click", () => void this.deleteSelectedRemoteFiles());
+  }
+
+  renderStatusSection(containerEl: HTMLElement, status: SyncCenterStatus) {
+    const sectionItems = this.items.filter((item) => item.status === status);
+    const sectionEl = containerEl.createDiv({ cls: "obsidian-git-syncer-sync-section" });
+    const headerEl = sectionEl.createDiv({ cls: "obsidian-git-syncer-sync-section-header" });
+    headerEl.createEl("h3", { text: toSyncCenterStatusLabel(status) });
+    headerEl.createSpan({
+      cls: `obsidian-git-syncer-status-badge ${toSyncCenterStatusClass(status)}`,
+      text: String(sectionItems.length)
+    });
+
+    if (sectionItems.length === 0) {
+      sectionEl.createDiv({ cls: "obsidian-git-syncer-sync-center-empty", text: "暂无文件。" });
+      return;
     }
+
+    const tree = this.buildTree(sectionItems);
+    const treeEl = sectionEl.createDiv({ cls: "obsidian-git-syncer-sync-tree" });
+    this.renderTreeContents(treeEl, tree, 0);
+  }
+
+  renderTreeContents(containerEl: HTMLElement, node: SyncTreeNode, depth: number) {
+    Array.from(node.children.values())
+      .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
+      .forEach((child) => {
+        this.renderDirectoryRow(containerEl, child, depth);
+        if (!this.collapsedPaths.has(child.path)) {
+          this.renderTreeContents(containerEl, child, depth + 1);
+        }
+      });
+
+    node.items
+      .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
+      .forEach((item) => this.renderFileRow(containerEl, item, depth));
+  }
+
+  renderDirectoryRow(containerEl: HTMLElement, node: SyncTreeNode, depth: number) {
+    const items = this.getNodeItems(node);
+    const selectedCount = items.filter((item) => this.selectedIds.has(item.id)).length;
+    const isCollapsed = this.collapsedPaths.has(node.path);
+    const rowEl = containerEl.createDiv({ cls: "obsidian-git-syncer-sync-tree-row is-folder" });
+    rowEl.addClass(isCollapsed ? "is-collapsed" : "is-expanded");
+    rowEl.style.setProperty("--sync-tree-depth", String(depth));
+
+    const checkbox = rowEl.createEl("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = selectedCount > 0 && selectedCount === items.length;
+    checkbox.indeterminate = selectedCount > 0 && selectedCount < items.length;
+    checkbox.addEventListener("click", (event) => event.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      this.setItemsSelected(items, checkbox.checked);
+      this.renderPreservingScroll();
+    });
+
+    const iconEl = rowEl.createSpan({ cls: "obsidian-git-syncer-sync-tree-icon" });
+    setIcon(iconEl, isCollapsed ? "folder-closed" : "folder-open");
+
+    const nameEl = rowEl.createSpan({ cls: "obsidian-git-syncer-sync-tree-name", text: node.name });
+    rowEl.createSpan({ cls: "obsidian-git-syncer-sync-tree-meta", text: `${items.length} 项` });
+    rowEl.addEventListener("click", () => this.toggleDirectory(node.path));
+  }
+
+  renderFileRow(containerEl: HTMLElement, item: SyncCenterItem, depth: number) {
+    const rowEl = containerEl.createDiv({ cls: "obsidian-git-syncer-sync-tree-row is-file" });
+    rowEl.style.setProperty("--sync-tree-depth", String(depth));
+
+    const checkbox = rowEl.createEl("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = this.selectedIds.has(item.id);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        this.selectedIds.add(item.id);
+      } else {
+        this.selectedIds.delete(item.id);
+      }
+      this.renderPreservingScroll();
+    });
+
+    const iconEl = rowEl.createSpan({ cls: "obsidian-git-syncer-sync-tree-icon" });
+    setIcon(iconEl, item.status === "localDeleted" ? "cloud-off" : isImagePath(item.remotePath) ? "image" : "file-text");
+    const textEl = rowEl.createSpan({ cls: "obsidian-git-syncer-sync-tree-text" });
+    textEl.createSpan({ cls: "obsidian-git-syncer-sync-tree-name", text: item.name });
+    textEl.createSpan({
+      cls: "obsidian-git-syncer-sync-tree-path",
+      text: item.localPath ? item.localPath : item.remotePath
+    });
+    rowEl.createSpan({
+      cls: `obsidian-git-syncer-status-badge ${toSyncCenterStatusClass(item.status)}`,
+      text: toSyncCenterStatusLabel(item.status)
+    });
+  }
+
+  async syncSelectedLocalFiles() {
+    const items = this.getSelectedLocalItems();
+    let successCount = 0;
+    let failureCount = 0;
+
+    for (const item of items) {
+      if (!item.file) {
+        continue;
+      }
+
+      try {
+        await this.plugin.syncFileToGitHub(item.file);
+        successCount += 1;
+        this.selectedIds.delete(item.id);
+      } catch {
+        failureCount += 1;
+      }
+    }
+
+    new Notice(`同步完成：成功 ${successCount}，失败 ${failureCount}`);
+    await this.refresh();
+  }
+
+  async pullSelectedRemoteFiles() {
+    const items = this.getSelectedRemoteOnlyItems();
+    let successCount = 0;
+    let failureCount = 0;
+
+    for (const item of items) {
+      try {
+        await this.plugin.pullRemoteFile(item.remotePath);
+        successCount += 1;
+        this.selectedIds.delete(item.id);
+      } catch {
+        failureCount += 1;
+      }
+    }
+
+    new Notice(`远端文件拉取完成：成功 ${successCount}，失败 ${failureCount}`);
+    await this.refresh();
+  }
+
+  async deleteSelectedRemoteFiles() {
+    const items = this.getSelectedRemoteItems();
+    let successCount = 0;
+    let failureCount = 0;
+
+    for (const item of items) {
+      try {
+        await this.plugin.deleteRemotePath(item.remotePath);
+        if (item.file) {
+          await this.plugin.setState(item.file, {
+            remotePath: item.remotePath,
+            sha: undefined,
+            htmlUrl: undefined,
+            status: "deleted"
+          });
+        }
+        successCount += 1;
+        this.selectedIds.delete(item.id);
+      } catch {
+        failureCount += 1;
+      }
+    }
+
+    new Notice(`远端残留清理完成：成功 ${successCount}，失败 ${failureCount}`);
+    await this.refresh();
   }
 }
 
@@ -1275,10 +2001,31 @@ class GitSyncerSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName(text).setHeading();
   }
 
+  renderConnectionStatus(containerEl: HTMLElement) {
+    const connection = this.plugin.data.connection ?? DEFAULT_DATA.connection;
+    const statusEl = containerEl.createDiv({
+      cls: `obsidian-git-syncer-connection-status is-${connection?.status ?? "unknown"}`
+    });
+    const iconEl = statusEl.createSpan({ cls: "obsidian-git-syncer-connection-status-icon" });
+    const iconName =
+      connection?.status === "success"
+        ? "check-circle-2"
+        : connection?.status === "failed"
+          ? "x-circle"
+          : connection?.status === "stale"
+            ? "alert-circle"
+            : "circle-help";
+    setIcon(iconEl, iconName);
+    statusEl.createSpan({
+      cls: "obsidian-git-syncer-connection-status-text",
+      text: `${connection?.message ?? "尚未测试连接。"}${connection?.checkedAt ? ` · ${connection.checkedAt}` : ""}`
+    });
+  }
+
   renderGeneralSettings(containerEl: HTMLElement) {
     const localRootDescription = this.plugin.getExistingFolder(this.plugin.settings.localRootPath)
       ? `当前目录有效：${this.plugin.settings.localRootPath}`
-      : "只有该目录内的 Markdown 才允许同步。当前值无效时请重新选择目录。";
+      : "只有该目录内的文件才允许同步。当前值无效时请重新选择目录。";
 
     this.createSearchableSetting(containerEl, "Local Root Path", localRootDescription, this.plugin.settings.localRootPath)
       .setName("Local Root Path")
@@ -1309,16 +2056,9 @@ class GitSyncerSettingTab extends PluginSettingTab {
       .setName("远端目录")
       .setDesc("插件只读写仓库 content 目录；本地同步目录内的相对路径会映射到 content 下。");
 
-    this.renderSectionSubheading(containerEl, "帮助与支持");
-
-    this.createSearchableSetting(containerEl, "插件版本", "查看当前插件版本、插件 ID 与兼容性信息。")
+    this.createSearchableSetting(containerEl, "插件版本", this.plugin.manifest.version, this.plugin.manifest.id)
       .setName("插件版本")
-      .setDesc("查看当前插件版本、插件 ID 与兼容性信息。")
-      .addButton((button) =>
-        button.setButtonText("查看").onClick(() => {
-          new PluginVersionModal(this.app, this.plugin).open();
-        })
-      );
+      .setDesc(`${this.plugin.manifest.name} v${this.plugin.manifest.version} · ${this.plugin.manifest.id}`);
   }
 
   renderRemoteSettings(containerEl: HTMLElement) {
@@ -1336,6 +2076,7 @@ class GitSyncerSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.repositoryUrl)
           .onChange(async (value) => {
             this.plugin.settings.repositoryUrl = value.trim();
+            await this.plugin.markConnectionStale();
             await this.plugin.saveSettings();
           })
       );
@@ -1349,6 +2090,7 @@ class GitSyncerSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.githubUsername)
           .onChange(async (value) => {
             this.plugin.settings.githubUsername = value.trim();
+            await this.plugin.markConnectionStale();
             await this.plugin.saveSettings();
           })
       );
@@ -1363,6 +2105,7 @@ class GitSyncerSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.githubToken)
           .onChange(async (value) => {
             this.plugin.settings.githubToken = value.trim();
+            await this.plugin.markConnectionStale();
             await this.plugin.saveSettings();
           });
       });
@@ -1376,6 +2119,7 @@ class GitSyncerSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.branch)
           .onChange(async (value) => {
             this.plugin.settings.branch = value.trim();
+            await this.plugin.markConnectionStale();
             await this.plugin.saveSettings();
           })
       );
@@ -1387,12 +2131,16 @@ class GitSyncerSettingTab extends PluginSettingTab {
         button.setButtonText("测试连接").onClick(async () => {
           try {
             await this.plugin.testConnection();
+            this.renderPanel(this.panelEl ?? containerEl);
           } catch (error) {
             const message = error instanceof Error ? error.message : "连接失败";
             new Notice(message);
+            this.renderPanel(this.panelEl ?? containerEl);
           }
         })
       );
+
+    this.renderConnectionStatus(containerEl);
   }
 
   renderSyncSettings(containerEl: HTMLElement) {

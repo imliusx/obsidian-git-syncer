@@ -101,6 +101,52 @@
   display: none;
 }
 
+.obsidian-git-syncer-connection-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.obsidian-git-syncer-connection-status-icon {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.obsidian-git-syncer-connection-status-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.obsidian-git-syncer-connection-status.is-success {
+  background: rgba(38, 166, 91, 0.12);
+  border-color: rgba(38, 166, 91, 0.28);
+  color: #1f7a46;
+}
+
+.obsidian-git-syncer-connection-status.is-failed {
+  background: rgba(220, 38, 38, 0.12);
+  border-color: rgba(220, 38, 38, 0.28);
+  color: #b91c1c;
+}
+
+.obsidian-git-syncer-connection-status.is-stale {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.3);
+  color: #a16207;
+}
+
+.obsidian-git-syncer-connection-status.is-unknown {
+  background: rgba(120, 120, 120, 0.08);
+  border-color: rgba(120, 120, 120, 0.16);
+  color: var(--text-muted);
+}
+
 .obsidian-git-syncer-actions p {
   margin: 0;
 }
@@ -177,9 +223,9 @@
 }
 
 .obsidian-git-syncer-status-badge.is-draft {
-  background: rgba(120, 120, 120, 0.12);
-  border-color: rgba(120, 120, 120, 0.2);
-  color: var(--text-muted);
+  background: rgba(14, 165, 233, 0.14);
+  border-color: rgba(14, 165, 233, 0.28);
+  color: #0369a1;
 }
 
 .obsidian-git-syncer-status-badge.is-synced {
@@ -206,8 +252,254 @@
   color: #b91c1c;
 }
 
+.obsidian-git-syncer-sync-center {
+  box-sizing: border-box;
+  display: grid;
+  gap: 14px;
+  width: min(860px, 100%);
+  max-width: 100%;
+  min-width: 0;
+  max-height: min(760px, 82vh);
+  overflow-x: hidden;
+}
+
+.modal-content:has(> .obsidian-git-syncer-sync-center) {
+  width: min(920px, calc(100vw - 64px));
+  max-width: calc(100vw - 64px);
+}
+
+.obsidian-git-syncer-sync-center-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding-bottom: 12px;
+}
+
+.obsidian-git-syncer-sync-center-header h2 {
+  margin: 0;
+}
+
+.obsidian-git-syncer-sync-center-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.obsidian-git-syncer-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.obsidian-git-syncer-icon-button:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover) !important;
+}
+
+.obsidian-git-syncer-sync-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.obsidian-git-syncer-sync-summary-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text-normal);
+  background: var(--background-secondary);
+  font-weight: 600;
+  min-width: 0;
+}
+
+.obsidian-git-syncer-sync-summary-item span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.obsidian-git-syncer-sync-summary-item.is-draft {
+  border-color: rgba(14, 165, 233, 0.3);
+  background: rgba(14, 165, 233, 0.1);
+}
+
+.obsidian-git-syncer-sync-summary-item.is-synced {
+  border-color: rgba(38, 166, 91, 0.28);
+}
+
+.obsidian-git-syncer-sync-summary-item.is-modified {
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.obsidian-git-syncer-sync-summary-item.is-deleted {
+  border-color: rgba(99, 102, 241, 0.28);
+}
+
+.obsidian-git-syncer-sync-summary-count {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.obsidian-git-syncer-sync-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.obsidian-git-syncer-sync-toolbar button {
+  white-space: nowrap;
+}
+
+.obsidian-git-syncer-sync-toolbar .obsidian-git-syncer-muted {
+  min-width: 0;
+}
+
+.obsidian-git-syncer-sync-center-body {
+  display: grid;
+  gap: 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 0;
+  scrollbar-width: none;
+  min-width: 0;
+}
+
+.obsidian-git-syncer-sync-center-body::-webkit-scrollbar {
+  display: none;
+}
+
+.obsidian-git-syncer-sync-section {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.obsidian-git-syncer-sync-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding: 0 0 6px;
+}
+
+.obsidian-git-syncer-sync-section-header h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.obsidian-git-syncer-sync-tree {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.obsidian-git-syncer-sync-tree-row {
+  --sync-tree-depth: 0;
+  display: grid;
+  grid-template-columns: 18px 20px minmax(0, 1fr) minmax(72px, auto);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 34px;
+  border-radius: 6px;
+  padding: 5px 12px 5px calc(8px + var(--sync-tree-depth) * 18px);
+}
+
+.obsidian-git-syncer-sync-tree-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.obsidian-git-syncer-sync-tree-row.is-folder {
+  grid-template-columns: 18px 20px minmax(0, 1fr) minmax(40px, auto);
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.obsidian-git-syncer-sync-tree-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.obsidian-git-syncer-sync-tree-row.is-folder .obsidian-git-syncer-sync-tree-icon,
+.obsidian-git-syncer-sync-tree-row.is-folder .obsidian-git-syncer-sync-tree-name {
+  cursor: pointer;
+}
+
+.obsidian-git-syncer-sync-tree-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.obsidian-git-syncer-sync-tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.obsidian-git-syncer-sync-tree-path,
+.obsidian-git-syncer-sync-tree-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.obsidian-git-syncer-sync-center-empty {
+  color: var(--text-muted);
+  padding: 4px 2px;
+}
+
+.obsidian-git-syncer-sync-center-error {
+  border: 1px solid rgba(220, 38, 38, 0.28);
+  border-radius: 6px;
+  background: rgba(220, 38, 38, 0.1);
+  color: #b91c1c;
+  padding: 10px 12px;
+}
+
 @media (max-width: 900px) {
   .obsidian-git-syncer-settings-nav {
     gap: 20px;
+  }
+
+  .obsidian-git-syncer-sync-center {
+    width: 100%;
+  }
+
+  .obsidian-git-syncer-sync-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .obsidian-git-syncer-sync-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .obsidian-git-syncer-sync-toolbar button {
+    width: 100%;
   }
 }
