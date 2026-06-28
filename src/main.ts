@@ -114,6 +114,7 @@ interface RemoteSyncFile {
 }
 
 type SyncCenterStatus = "unpublished" | "modified" | "published" | "localDeleted";
+type SyncCenterOperation = "sync" | "pull" | "delete";
 
 interface SyncCenterItem {
   id: string;
@@ -458,9 +459,6 @@ function toSyncCenterStatusClass(status: SyncCenterStatus): string {
 export default class ObsidianGitSyncerPlugin extends Plugin {
   settings: GitHubSyncSettings = DEFAULT_SETTINGS;
   data: PersistedData = DEFAULT_DATA;
-  statusBarEl!: HTMLElement;
-  statusBarIconEl!: HTMLElement;
-  statusBarTextEl!: HTMLElement;
 
   async onload() {
     await this.loadSettings();
@@ -474,20 +472,8 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
       callback: () => this.openSyncCenter()
     });
 
-    this.statusBarEl = this.addStatusBarItem();
-    this.statusBarEl.addClass("obsidian-git-syncer-status");
-    this.statusBarIconEl = this.statusBarEl.createSpan({ cls: "obsidian-git-syncer-status-icon" });
-    this.statusBarTextEl = this.statusBarEl.createSpan({ cls: "obsidian-git-syncer-status-text" });
     this.addSettingTab(new GitSyncerSettingTab(this.app, this));
 
-    this.registerEvent(this.app.workspace.on("file-open", () => void this.refreshStatusBar()));
-    this.registerEvent(
-      this.app.vault.on("modify", (file) => {
-        if (file instanceof TFile && file === this.getCurrentFile()) {
-          void this.refreshStatusBar();
-        }
-      })
-    );
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu) => {
         const file = this.getCurrentFile();
@@ -498,8 +484,6 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
         this.addArticleContextMenuItems(menu, file);
       })
     );
-
-    await this.refreshStatusBar();
   }
 
   async loadSettings() {
@@ -740,37 +724,8 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
     await this.refreshStatusBar();
   }
 
-  setStatusBarState(statusClass: string | null) {
-    this.statusBarEl.removeClass("is-draft", "is-synced", "is-modified", "is-deleted", "is-failed", "is-inactive");
-
-    if (statusClass) {
-      this.statusBarEl.addClass(statusClass);
-    }
-  }
-
   async refreshStatusBar() {
-    const file = this.getCurrentFile();
-
-    if (!file) {
-      this.setStatusBarState("is-inactive");
-      setIcon(this.statusBarIconEl, "git-branch");
-      this.statusBarTextEl.setText("无活动文章");
-      return;
-    }
-
-    if (!this.isInsideRoot(file)) {
-      this.setStatusBarState("is-inactive");
-      setIcon(this.statusBarIconEl, "git-branch");
-      this.statusBarTextEl.setText("不在同步目录");
-      return;
-    }
-
-    const state = await this.getEffectiveState(file);
-    const label = toStatusLabel(state.status);
-    this.setStatusBarState(toStatusClass(state.status));
-
-    setIcon(this.statusBarIconEl, toStatusIcon(state.status));
-    this.statusBarTextEl.setText(label);
+    return;
   }
 
   async ensureTemplateFrontmatter(file: TFile) {
@@ -1559,6 +1514,7 @@ class SyncCenterModal extends Modal {
   selectedIds = new Set<string>();
   collapsedPaths = new Set<string>();
   deletedRemotePaths = new Set<string>();
+  activeOperation: SyncCenterOperation | null = null;
   loading = false;
   errorMessage = "";
 
@@ -1773,36 +1729,71 @@ class SyncCenterModal extends Modal {
     const selectedLocalCount = this.getSelectedLocalItems().length;
     const selectedRemoteOnlyCount = this.getSelectedRemoteOnlyItems().length;
     const selectedRemoteCount = this.getSelectedRemoteItems().length;
+    const isBusy = this.loading || this.activeOperation !== null;
 
     toolbarEl.createDiv({
       cls: "obsidian-git-syncer-muted",
       text: `已选择 ${this.selectedIds.size} 项`
     });
 
-    const createToolbarButton = (label: string, icon: string) => {
+    const createToolbarButton = (label: string, icon: string, operation: SyncCenterOperation) => {
+      const isRunning = this.activeOperation === operation;
       const buttonEl = toolbarEl.createEl("button");
       buttonEl.type = "button";
+      buttonEl.toggleClass("is-running", isRunning);
+      buttonEl.setAttribute("aria-busy", isRunning ? "true" : "false");
 
       const iconEl = buttonEl.createSpan({ cls: "obsidian-git-syncer-button-icon" });
-      setIcon(iconEl, icon);
-      buttonEl.createSpan({ cls: "obsidian-git-syncer-button-label", text: label });
+      setIcon(iconEl, isRunning ? "loader-circle" : icon);
+      buttonEl.createSpan({ cls: "obsidian-git-syncer-button-label", text: isRunning ? this.getOperationButtonLabel(operation) : label });
 
       return buttonEl;
     };
 
-    const deleteButton = createToolbarButton(`删除远端 (${selectedRemoteCount})`, "cloud-off");
-    deleteButton.disabled = selectedRemoteCount === 0;
+    const deleteButton = createToolbarButton(`删除远端 (${selectedRemoteCount})`, "cloud-off", "delete");
+    deleteButton.disabled = isBusy || selectedRemoteCount === 0;
     deleteButton.addClass("mod-warning");
     deleteButton.addEventListener("click", () => void this.deleteSelectedRemoteFiles());
 
-    const pullButton = createToolbarButton(`拉取远端 (${selectedRemoteOnlyCount})`, "cloud-download");
-    pullButton.disabled = selectedRemoteOnlyCount === 0;
+    const pullButton = createToolbarButton(`拉取远端 (${selectedRemoteOnlyCount})`, "cloud-download", "pull");
+    pullButton.disabled = isBusy || selectedRemoteOnlyCount === 0;
     pullButton.addEventListener("click", () => void this.pullSelectedRemoteFiles());
 
-    const syncButton = createToolbarButton(`同步本地 (${selectedLocalCount})`, "cloud-upload");
-    syncButton.disabled = selectedLocalCount === 0;
+    const syncButton = createToolbarButton(`同步本地 (${selectedLocalCount})`, "cloud-upload", "sync");
+    syncButton.disabled = isBusy || selectedLocalCount === 0;
     syncButton.addClass("obsidian-git-syncer-sync-action");
     syncButton.addEventListener("click", () => void this.syncSelectedLocalFiles());
+
+    if (this.activeOperation) {
+      containerEl.createDiv({
+        cls: "obsidian-git-syncer-sync-operation-status",
+        text: this.getOperationStatusText(this.activeOperation)
+      });
+    }
+  }
+
+  getOperationButtonLabel(operation: SyncCenterOperation): string {
+    switch (operation) {
+      case "delete":
+        return "删除中...";
+      case "pull":
+        return "拉取中...";
+      case "sync":
+      default:
+        return "同步中...";
+    }
+  }
+
+  getOperationStatusText(operation: SyncCenterOperation): string {
+    switch (operation) {
+      case "delete":
+        return "正在删除远端文件，请稍候...";
+      case "pull":
+        return "正在拉取远端文件，请稍候...";
+      case "sync":
+      default:
+        return "正在同步本地文件，请稍候...";
+    }
   }
 
   renderStatusSection(containerEl: HTMLElement, status: SyncCenterStatus) {
@@ -1897,9 +1888,19 @@ class SyncCenterModal extends Modal {
   }
 
   async syncSelectedLocalFiles() {
+    if (this.activeOperation) {
+      return;
+    }
+
     const items = this.getSelectedLocalItems();
+    if (items.length === 0) {
+      return;
+    }
+
     let successCount = 0;
     let failureCount = 0;
+    this.activeOperation = "sync";
+    this.renderPreservingScroll();
 
     for (const item of items) {
       if (!item.file) {
@@ -1924,13 +1925,24 @@ class SyncCenterModal extends Modal {
     }
 
     new Notice(`同步完成：成功 ${successCount}，失败 ${failureCount}`);
+    this.activeOperation = null;
     this.renderPreservingScroll();
   }
 
   async pullSelectedRemoteFiles() {
+    if (this.activeOperation) {
+      return;
+    }
+
     const items = this.getSelectedRemoteOnlyItems();
+    if (items.length === 0) {
+      return;
+    }
+
     let successCount = 0;
     let failureCount = 0;
+    this.activeOperation = "pull";
+    this.renderPreservingScroll();
 
     for (const item of items) {
       try {
@@ -1943,13 +1955,24 @@ class SyncCenterModal extends Modal {
     }
 
     new Notice(`远端文件拉取完成：成功 ${successCount}，失败 ${failureCount}`);
+    this.activeOperation = null;
     await this.refresh();
   }
 
   async deleteSelectedRemoteFiles() {
+    if (this.activeOperation) {
+      return;
+    }
+
     const items = this.getSelectedRemoteItems();
+    if (items.length === 0) {
+      return;
+    }
+
     let successCount = 0;
     let failureCount = 0;
+    this.activeOperation = "delete";
+    this.renderPreservingScroll();
 
     for (const item of items) {
       try {
@@ -1971,6 +1994,7 @@ class SyncCenterModal extends Modal {
     }
 
     new Notice(`远端残留清理完成：成功 ${successCount}，失败 ${failureCount}`);
+    this.activeOperation = null;
     this.items = this.applyDeletedRemoteOverrides(this.items);
     this.renderPreservingScroll();
   }
