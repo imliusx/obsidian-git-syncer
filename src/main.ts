@@ -135,6 +135,7 @@ interface SyncTreeNode {
 }
 
 const REMOTE_CONTENT_ROOT = "content";
+const VAULT_ROOT_PATH = "/";
 
 const DEFAULT_SETTINGS: GitHubSyncSettings = {
   repositoryUrl: "",
@@ -316,11 +317,33 @@ async function gitBlobSha(input: ArrayBuffer): Promise<string> {
 
 function isSyncableFile(file: TFile): boolean {
   const name = file.name.toLowerCase();
-  if (name.startsWith(".") || name === ".ds_store" || name === "thumbs.db") {
+  if (isHiddenPath(file.path) || name.startsWith(".") || name === ".ds_store" || name === "thumbs.db") {
     return false;
   }
 
   return true;
+}
+
+function isHiddenPath(path: string): boolean {
+  const normalized = normalizePath(path).replace(/^\/+/, "");
+  if (!normalized) {
+    return false;
+  }
+
+  return normalized.split("/").some((segment) => segment.startsWith("."));
+}
+
+function normalizeLocalRootPath(path: string): string {
+  const normalized = normalizePath(path.trim());
+  if (!normalized || normalized === VAULT_ROOT_PATH || normalized === ".") {
+    return VAULT_ROOT_PATH;
+  }
+
+  return normalized.replace(/^\/+/, "").replace(/\/+$/, "") || VAULT_ROOT_PATH;
+}
+
+function displayLocalRootPath(path: string): string {
+  return normalizeLocalRootPath(path);
 }
 
 function isImagePath(path: string): boolean {
@@ -530,36 +553,50 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
   }
 
   getExistingFolder(path: string): TFolder | null {
-    const normalized = normalizePath(path).replace(/\/$/, "");
+    const normalized = normalizeLocalRootPath(path);
+    if (normalized === VAULT_ROOT_PATH) {
+      return this.app.vault.getRoot();
+    }
+
     const target = this.app.vault.getAbstractFileByPath(normalized);
     return target instanceof TFolder ? target : null;
   }
 
   getAllVaultFolders(): TFolder[] {
-    const folders: TFolder[] = [];
+    const folders = new Map<string, TFolder>();
+    folders.set(VAULT_ROOT_PATH, this.app.vault.getRoot());
 
     this.app.vault.getAllLoadedFiles().forEach((entry) => {
-      if (entry instanceof TFolder && entry.path) {
-        folders.push(entry);
+      if (entry instanceof TFolder && !isHiddenPath(entry.path)) {
+        folders.set(normalizeLocalRootPath(entry.path), entry);
       }
     });
 
-    return folders.sort((a, b) => a.path.localeCompare(b.path, "zh-CN"));
+    return Array.from(folders.values()).sort((a, b) => {
+      const aPath = displayLocalRootPath(a.path);
+      const bPath = displayLocalRootPath(b.path);
+
+      if (aPath === VAULT_ROOT_PATH) {
+        return -1;
+      }
+
+      if (bPath === VAULT_ROOT_PATH) {
+        return 1;
+      }
+
+      return aPath.localeCompare(bPath, "zh-CN");
+    });
   }
 
   async setLocalRootPath(path: string) {
-    const normalized = normalizePath(path.trim()).replace(/\/$/, "");
-
-    if (!normalized) {
-      throw new Error("Local Root Path 不能为空。");
-    }
+    const normalized = normalizeLocalRootPath(path);
 
     const folder = this.getExistingFolder(normalized);
     if (!folder) {
       throw new Error("该目录不存在，请从 Vault 中选择已有目录。");
     }
 
-    this.settings.localRootPath = folder.path;
+    this.settings.localRootPath = normalized === VAULT_ROOT_PATH ? VAULT_ROOT_PATH : folder.path;
     await this.saveSettings();
   }
 
@@ -569,17 +606,21 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
   }
 
   isInsideRoot(file: TFile): boolean {
-    const root = normalizePath(this.settings.localRootPath).replace(/\/$/, "");
-    if (!root) {
-      return false;
+    const root = normalizeLocalRootPath(this.settings.localRootPath);
+    if (root === VAULT_ROOT_PATH) {
+      return true;
     }
 
     return file.path === root || file.path.startsWith(`${root}/`);
   }
 
   relativePath(file: TFile): string {
-    const root = normalizePath(this.settings.localRootPath).replace(/\/$/, "");
+    const root = normalizeLocalRootPath(this.settings.localRootPath);
     const fullPath = normalizePath(file.path);
+
+    if (root === VAULT_ROOT_PATH) {
+      return fullPath;
+    }
 
     if (fullPath === root) {
       return "";
@@ -611,7 +652,11 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
     }
 
     const relative = normalizedRemotePath.slice(REMOTE_CONTENT_ROOT.length + 1);
-    const localRoot = normalizePath(this.settings.localRootPath).replace(/\/$/, "");
+    const localRoot = normalizeLocalRootPath(this.settings.localRootPath);
+    if (localRoot === VAULT_ROOT_PATH) {
+      return normalizePath(relative);
+    }
+
     return normalizePath(`${localRoot}/${relative}`);
   }
 
@@ -1114,7 +1159,7 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
     folder.children.forEach((entry) => {
       if (entry instanceof TFile && isSyncableFile(entry)) {
         files.push(entry);
-      } else if (entry instanceof TFolder) {
+      } else if (entry instanceof TFolder && !isHiddenPath(entry.path)) {
         this.collectSyncableFiles(entry, files);
       }
     });
@@ -1274,7 +1319,7 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
   }
 
   async syncFileState(file: TFile): Promise<LocalFileState> {
-    if (!this.isInsideRoot(file)) {
+    if (!this.isInsideRoot(file) || !isSyncableFile(file)) {
       return { status: "draft" };
     }
 
@@ -1363,6 +1408,10 @@ export default class ObsidianGitSyncerPlugin extends Plugin {
 
     if (!this.isInsideRoot(file)) {
       throw new Error("当前文章不在 Local Root Path 内。");
+    }
+
+    if (!isSyncableFile(file)) {
+      throw new Error("隐藏文件或系统文件不允许同步。");
     }
 
     const isMarkdown = file.extension === "md";
@@ -1509,6 +1558,7 @@ class SyncCenterModal extends Modal {
   items: SyncCenterItem[] = [];
   selectedIds = new Set<string>();
   collapsedPaths = new Set<string>();
+  deletedRemotePaths = new Set<string>();
   loading = false;
   errorMessage = "";
 
@@ -1527,7 +1577,7 @@ class SyncCenterModal extends Modal {
     this.render();
 
     try {
-      this.items = await this.plugin.buildSyncCenterItems();
+      this.items = this.applyDeletedRemoteOverrides(await this.plugin.buildSyncCenterItems());
       const validIds = new Set(this.items.map((item) => item.id));
       this.selectedIds.forEach((id) => {
         if (!validIds.has(id)) {
@@ -1540,6 +1590,26 @@ class SyncCenterModal extends Modal {
       this.loading = false;
       this.render();
     }
+  }
+
+  applyDeletedRemoteOverrides(items: SyncCenterItem[]): SyncCenterItem[] {
+    return items.flatMap((item) => {
+      if (!this.deletedRemotePaths.has(item.remotePath)) {
+        return [item];
+      }
+
+      if (!item.file) {
+        return [];
+      }
+
+      return [
+        {
+          ...item,
+          status: "unpublished",
+          remote: undefined
+        }
+      ];
+    });
   }
 
   getSelectedItems(): SyncCenterItem[] {
@@ -1840,6 +1910,7 @@ class SyncCenterModal extends Modal {
         const nextState = await this.plugin.syncFileToGitHub(item.file);
         successCount += 1;
         this.selectedIds.delete(item.id);
+        this.deletedRemotePaths.delete(item.remotePath);
         item.status = "published";
         item.state = nextState;
         item.remote = {
@@ -1883,6 +1954,7 @@ class SyncCenterModal extends Modal {
     for (const item of items) {
       try {
         await this.plugin.deleteRemotePath(item.remotePath);
+        this.deletedRemotePaths.add(item.remotePath);
         if (item.file) {
           await this.plugin.setState(item.file, {
             remotePath: item.remotePath,
@@ -1899,7 +1971,8 @@ class SyncCenterModal extends Modal {
     }
 
     new Notice(`远端残留清理完成：成功 ${successCount}，失败 ${failureCount}`);
-    await this.refresh();
+    this.items = this.applyDeletedRemoteOverrides(this.items);
+    this.renderPreservingScroll();
   }
 }
 
@@ -2065,16 +2138,17 @@ class GitSyncerSettingTab extends PluginSettingTab {
   }
 
   renderGeneralSettings(containerEl: HTMLElement) {
+    const localRootPath = displayLocalRootPath(this.plugin.settings.localRootPath);
     const localRootDescription = this.plugin.getExistingFolder(this.plugin.settings.localRootPath)
-      ? `当前目录有效：${this.plugin.settings.localRootPath}`
+      ? `当前目录有效：${localRootPath}`
       : "只有该目录内的文件才允许同步。当前值无效时请重新选择目录。";
 
-    this.createSearchableSetting(containerEl, "Local Root Path", localRootDescription, this.plugin.settings.localRootPath)
+    this.createSearchableSetting(containerEl, "Local Root Path", localRootDescription, localRootPath)
       .setName("Local Root Path")
       .setDesc(localRootDescription)
       .addText((text) =>
-        text.setValue(this.plugin.settings.localRootPath).onChange(async (value) => {
-          this.plugin.settings.localRootPath = normalizePath(value.trim());
+        text.setValue(localRootPath).onChange(async (value) => {
+          this.plugin.settings.localRootPath = normalizeLocalRootPath(value);
           await this.plugin.saveSettings();
           this.display();
         })
@@ -2084,7 +2158,7 @@ class GitSyncerSettingTab extends PluginSettingTab {
           new FolderSelectModal(this.app, this.plugin, async (folder) => {
             try {
               await this.plugin.setLocalRootPath(folder.path);
-              new Notice(`已设置 Local Root Path：${folder.path}`);
+              new Notice(`已设置 Local Root Path：${displayLocalRootPath(this.plugin.settings.localRootPath)}`);
               this.display();
             } catch (error) {
               const message = error instanceof Error ? error.message : "设置失败";
@@ -2319,7 +2393,7 @@ class FolderSelectModal extends FuzzySuggestModal<TFolder> {
   }
 
   getItemText(folder: TFolder): string {
-    return folder.path;
+    return folder.path || VAULT_ROOT_PATH;
   }
 
   async onChooseItem(folder: TFolder): Promise<void> {
