@@ -169,6 +169,21 @@
   border: 1px solid transparent;
 }
 
+.obsidian-git-syncer-status-icon-only {
+  background: transparent !important;
+  border: 0;
+  border-radius: 0;
+  height: 22px;
+  justify-content: center;
+  padding: 0;
+  width: 22px;
+}
+
+.obsidian-git-syncer-status-icon-only svg {
+  height: 17px;
+  width: 17px;
+}
+
 .obsidian-git-syncer-status-badge.is-draft {
   background: rgba(14, 165, 233, 0.14);
   border-color: rgba(14, 165, 233, 0.28);
@@ -258,49 +273,75 @@
 .obsidian-git-syncer-sync-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
 }
 
 .obsidian-git-syncer-sync-summary-item {
-  display: flex;
+  --sync-summary-color: var(--text-muted);
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border: 0;
+  border-radius: 0;
+  padding: 4px 2px 4px 10px;
   color: var(--text-normal);
-  background: var(--background-secondary);
+  background: transparent;
   font-weight: 600;
   min-width: 0;
 }
 
-.obsidian-git-syncer-sync-summary-item span:first-child {
+.obsidian-git-syncer-sync-summary-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 5px;
+  bottom: 5px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--sync-summary-color);
+}
+
+.obsidian-git-syncer-sync-summary-icon {
+  align-items: center;
+  color: var(--sync-summary-color);
+  display: inline-flex;
+  justify-content: center;
+}
+
+.obsidian-git-syncer-sync-summary-icon svg {
+  height: 16px;
+  width: 16px;
+}
+
+.obsidian-git-syncer-sync-summary-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text-muted);
 }
 
 .obsidian-git-syncer-sync-summary-item.is-draft {
-  border-color: rgba(14, 165, 233, 0.3);
-  background: rgba(14, 165, 233, 0.1);
+  --sync-summary-color: #0ea5e9;
 }
 
 .obsidian-git-syncer-sync-summary-item.is-synced {
-  border-color: rgba(38, 166, 91, 0.28);
+  --sync-summary-color: #22c55e;
 }
 
 .obsidian-git-syncer-sync-summary-item.is-modified {
-  border-color: rgba(245, 158, 11, 0.3);
+  --sync-summary-color: #f59e0b;
 }
 
 .obsidian-git-syncer-sync-summary-item.is-deleted {
-  border-color: rgba(99, 102, 241, 0.28);
+  --sync-summary-color: #818cf8;
 }
 
 .obsidian-git-syncer-sync-summary-count {
-  color: var(--text-muted);
+  color: var(--text-normal);
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
@@ -428,6 +469,14 @@
   font-size: 15px;
 }
 
+.obsidian-git-syncer-sync-section-count {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .obsidian-git-syncer-sync-tree {
   display: grid;
   gap: 2px;
@@ -444,6 +493,10 @@
   min-height: 34px;
   border-radius: 6px;
   padding: 5px 12px 5px calc(8px + var(--sync-tree-depth) * 18px);
+}
+
+.obsidian-git-syncer-sync-tree-row input[type="checkbox"] {
+  accent-color: #38bdf8;
 }
 
 .obsidian-git-syncer-sync-tree-row:hover {

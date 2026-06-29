@@ -441,6 +441,21 @@ function toSyncCenterStatusLabel(status: SyncCenterStatus): string {
   }
 }
 
+function toSyncCenterSummaryLabel(status: SyncCenterStatus): string {
+  switch (status) {
+    case "unpublished":
+      return "未发布";
+    case "modified":
+      return "已修改";
+    case "published":
+      return "已发布";
+    case "localDeleted":
+      return "已删除";
+    default:
+      return status;
+  }
+}
+
 function toSyncCenterStatusClass(status: SyncCenterStatus): string {
   switch (status) {
     case "unpublished":
@@ -453,6 +468,21 @@ function toSyncCenterStatusClass(status: SyncCenterStatus): string {
       return "is-deleted";
     default:
       return "is-draft";
+  }
+}
+
+function toSyncCenterStatusIcon(status: SyncCenterStatus): string {
+  switch (status) {
+    case "unpublished":
+      return "cloud-upload";
+    case "modified":
+      return "pencil";
+    case "published":
+      return "cloud-check";
+    case "localDeleted":
+      return "cloud-off";
+    default:
+      return "circle";
   }
 }
 
@@ -1719,7 +1749,9 @@ class SyncCenterModal extends Modal {
       const badgeEl = summaryEl.createDiv({
         cls: `obsidian-git-syncer-sync-summary-item ${toSyncCenterStatusClass(status)}`
       });
-      badgeEl.createSpan({ text: toSyncCenterStatusLabel(status) });
+      const iconEl = badgeEl.createSpan({ cls: "obsidian-git-syncer-sync-summary-icon" });
+      setIcon(iconEl, toSyncCenterStatusIcon(status));
+      badgeEl.createSpan({ cls: "obsidian-git-syncer-sync-summary-label", text: toSyncCenterSummaryLabel(status) });
       badgeEl.createSpan({ text: String(count), cls: "obsidian-git-syncer-sync-summary-count" });
     });
   }
@@ -1796,13 +1828,36 @@ class SyncCenterModal extends Modal {
     }
   }
 
+  getFailureMessage(error: unknown): string {
+    if (error instanceof Error && error.message.trim()) {
+      return error.message.trim();
+    }
+
+    return "未知错误";
+  }
+
+  formatFailureReason(item: SyncCenterItem, error: unknown): string {
+    const path = item.localPath ?? item.remotePath;
+    return `${path}：${this.getFailureMessage(error)}`;
+  }
+
+  buildCompletionNotice(title: string, successCount: number, failureReasons: string[]): string {
+    const summary = `${title}：成功 ${successCount}，失败 ${failureReasons.length}`;
+    if (failureReasons.length === 0) {
+      return summary;
+    }
+
+    const extra = failureReasons.length > 1 ? `；另有 ${failureReasons.length - 1} 个失败` : "";
+    return `${summary}\n失败原因：${failureReasons[0]}${extra}`;
+  }
+
   renderStatusSection(containerEl: HTMLElement, status: SyncCenterStatus) {
     const sectionItems = this.items.filter((item) => item.status === status);
     const sectionEl = containerEl.createDiv({ cls: "obsidian-git-syncer-sync-section" });
     const headerEl = sectionEl.createDiv({ cls: "obsidian-git-syncer-sync-section-header" });
     headerEl.createEl("h3", { text: toSyncCenterStatusLabel(status) });
     headerEl.createSpan({
-      cls: `obsidian-git-syncer-status-badge ${toSyncCenterStatusClass(status)}`,
+      cls: "obsidian-git-syncer-sync-section-count",
       text: String(sectionItems.length)
     });
 
@@ -1881,10 +1936,12 @@ class SyncCenterModal extends Modal {
       cls: "obsidian-git-syncer-sync-tree-path",
       text: item.localPath ? item.localPath : item.remotePath
     });
-    rowEl.createSpan({
-      cls: `obsidian-git-syncer-status-badge ${toSyncCenterStatusClass(item.status)}`,
-      text: toSyncCenterStatusLabel(item.status)
+    const statusEl = rowEl.createSpan({
+      cls: `obsidian-git-syncer-status-badge obsidian-git-syncer-status-icon-only ${toSyncCenterStatusClass(item.status)}`
     });
+    statusEl.setAttribute("aria-label", toSyncCenterStatusLabel(item.status));
+    statusEl.setAttribute("title", toSyncCenterStatusLabel(item.status));
+    setIcon(statusEl, toSyncCenterStatusIcon(item.status));
   }
 
   async syncSelectedLocalFiles() {
@@ -1898,7 +1955,7 @@ class SyncCenterModal extends Modal {
     }
 
     let successCount = 0;
-    let failureCount = 0;
+    const failureReasons: string[] = [];
     this.activeOperation = "sync";
     this.renderPreservingScroll();
 
@@ -1919,12 +1976,12 @@ class SyncCenterModal extends Modal {
           sha: nextState.sha ?? "",
           htmlUrl: nextState.htmlUrl ?? this.plugin.buildGitHubBlobUrl(item.remotePath)
         };
-      } catch {
-        failureCount += 1;
+      } catch (error) {
+        failureReasons.push(this.formatFailureReason(item, error));
       }
     }
 
-    new Notice(`同步完成：成功 ${successCount}，失败 ${failureCount}`);
+    new Notice(this.buildCompletionNotice("同步完成", successCount, failureReasons), failureReasons.length > 0 ? 12000 : 5000);
     this.activeOperation = null;
     this.renderPreservingScroll();
   }
@@ -1940,7 +1997,7 @@ class SyncCenterModal extends Modal {
     }
 
     let successCount = 0;
-    let failureCount = 0;
+    const failureReasons: string[] = [];
     this.activeOperation = "pull";
     this.renderPreservingScroll();
 
@@ -1949,12 +2006,12 @@ class SyncCenterModal extends Modal {
         await this.plugin.pullRemoteFile(item.remotePath);
         successCount += 1;
         this.selectedIds.delete(item.id);
-      } catch {
-        failureCount += 1;
+      } catch (error) {
+        failureReasons.push(this.formatFailureReason(item, error));
       }
     }
 
-    new Notice(`远端文件拉取完成：成功 ${successCount}，失败 ${failureCount}`);
+    new Notice(this.buildCompletionNotice("远端文件拉取完成", successCount, failureReasons), failureReasons.length > 0 ? 12000 : 5000);
     this.activeOperation = null;
     await this.refresh();
   }
@@ -1970,7 +2027,7 @@ class SyncCenterModal extends Modal {
     }
 
     let successCount = 0;
-    let failureCount = 0;
+    const failureReasons: string[] = [];
     this.activeOperation = "delete";
     this.renderPreservingScroll();
 
@@ -1988,12 +2045,12 @@ class SyncCenterModal extends Modal {
         }
         successCount += 1;
         this.selectedIds.delete(item.id);
-      } catch {
-        failureCount += 1;
+      } catch (error) {
+        failureReasons.push(this.formatFailureReason(item, error));
       }
     }
 
-    new Notice(`远端残留清理完成：成功 ${successCount}，失败 ${failureCount}`);
+    new Notice(this.buildCompletionNotice("远端残留清理完成", successCount, failureReasons), failureReasons.length > 0 ? 12000 : 5000);
     this.activeOperation = null;
     this.items = this.applyDeletedRemoteOverrides(this.items);
     this.renderPreservingScroll();
